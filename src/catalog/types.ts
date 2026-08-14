@@ -19,6 +19,14 @@ const MAX_INSTALL_NAME_LENGTH = 255,
   INVALID_CATEGORY_RUN = /[^a-z0-9]+/g,
   CATEGORY_EDGE = /^-+|-+$/g;
 
+export function assertSafeSkillName(value: string): void {
+  if (value.startsWith("-")) {
+    throw new ViblibError(
+      "Option-like skill names cannot be passed to skills@1.5.22."
+    );
+  }
+}
+
 export function normalizeInstallName(value: string): string {
   const normalized = value
     .toLowerCase()

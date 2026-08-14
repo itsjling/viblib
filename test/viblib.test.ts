@@ -15,7 +15,11 @@ import {
 } from "../src/catalog/types.js";
 import { createProgram } from "../src/cli.js";
 import { runAdd } from "../src/commands/add.js";
-import { runInstall, selectCatalogSkills } from "../src/commands/install.js";
+import {
+  applyCatalogInstall,
+  runInstall,
+  selectCatalogSkills,
+} from "../src/commands/install.js";
 import { runSync } from "../src/commands/sync.js";
 import { runUninstall } from "../src/commands/uninstall.js";
 import {
@@ -145,6 +149,33 @@ describe("catalog storage", () => {
       })
     ).toThrow('skills."my-skill".categories[0]');
   });
+
+  it("rejects option-like skill names without exposing them", () => {
+    const optionLikeName = "-unsafe-skill";
+    let thrown: unknown = undefined;
+    try {
+      validateCatalog({
+        skills: {
+          "unsafe-skill": {
+            categories: ["work"],
+            skill: optionLikeName,
+            source: "owner/repo",
+          },
+        },
+        version: 1,
+      });
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(ViblibError);
+    expect(thrown).toMatchObject({
+      message:
+        'Invalid catalog at skills."unsafe-skill".skill: is not a valid install name.',
+    });
+    expect(thrown).toMatchObject({
+      message: expect.not.stringContaining(optionLikeName),
+    });
+  });
 });
 
 describe("catalog commands", () => {
@@ -226,6 +257,16 @@ describe("pinned skills adapter", () => {
       discoverSkills("owner/repo", { runner: async () => success("changed") })
     ).rejects.toThrow("skills@1.5.22");
   });
+
+  it("rejects option-like discovery names", async () => {
+    const output = DISCOVERY_OUTPUT.replace("Foo Skill", "-unsafe-skill");
+    await expect(
+      discoverSkills("owner/repo", { runner: async () => success(output) })
+    ).rejects.toThrow(ViblibError);
+    await expect(
+      discoverSkills("owner/repo", { runner: async () => success(output) })
+    ).rejects.toThrow("Option-like skill names");
+  });
 });
 
 describe("install and uninstall", () => {
@@ -281,6 +322,53 @@ describe("install and uninstall", () => {
         "--agent",
         "codex",
       ],
+    ]);
+  });
+
+  it("rejects option-like names before calling the installer", async () => {
+    const calls: string[][] = [],
+      install = () =>
+        applyCatalogInstall(
+          [
+            {
+              categories: [],
+              skill: "-unsafe-skill",
+              source: "owner/repo",
+            },
+          ],
+          {
+            runner: async (args) => {
+              calls.push(args);
+              return success();
+            },
+            scope: "project",
+          }
+        );
+    await expect(install()).rejects.toThrow(ViblibError);
+    await expect(install()).rejects.toThrow("Option-like skill names");
+    expect(calls).toEqual([]);
+  });
+
+  it("keeps normal multiword names intact with the option-like guard", async () => {
+    const calls: string[][] = [];
+    await applyCatalogInstall(
+      [
+        {
+          categories: [],
+          skill: "Foo Skill",
+          source: "owner/repo",
+        },
+      ],
+      {
+        runner: async (args) => {
+          calls.push(args);
+          return success();
+        },
+        scope: "project",
+      }
+    );
+    expect(calls).toEqual([
+      ["add", "owner/repo", "--skill", "Foo Skill", "--yes"],
     ]);
   });
 

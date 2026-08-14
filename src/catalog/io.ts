@@ -7,6 +7,7 @@ import {
   CATALOG_VERSION,
   type Catalog,
   type CatalogSkill,
+  assertSafeSkillName,
   emptyCatalog,
   normalizeCategory,
   normalizeInstallName,
@@ -68,6 +69,11 @@ function validateSkill(value: unknown, key: string): CatalogSkill {
     hasControlCharacters(value.skill)
   ) {
     invalid(`${field}.skill`, "expected a non-empty string.");
+  }
+  try {
+    assertSafeSkillName(value.skill);
+  } catch {
+    invalid(`${field}.skill`, "is not a valid install name.");
   }
   if (
     typeof value.source !== "string" ||
