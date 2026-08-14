@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-export async function makeTempDir(prefix = "vibetools-test-"): Promise<string> {
+export async function makeTempDir(prefix = "viblib-test-"): Promise<string> {
   return await fs.mkdtemp(path.join(os.tmpdir(), prefix));
 }
 

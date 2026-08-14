@@ -1,141 +1,216 @@
+import { realpathSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+
 import chalk from "chalk";
 import { Command } from "commander";
 
-import { runCollect } from "./commands/collect.js";
-import { runConfigure } from "./commands/configure.js";
-import { runDoctor } from "./commands/doctor.js";
-import { runInit } from "./commands/init.js";
+import packageMetadata from "../package.json";
+import { runAdd } from "./commands/add.js";
+import {
+  runCategoryAdd,
+  runCategoryList,
+  runCategoryRemove,
+} from "./commands/category.js";
 import { runInstall } from "./commands/install.js";
 import { runList } from "./commands/list.js";
-import { runPull } from "./commands/pull.js";
-import { runPush } from "./commands/push.js";
-import { runRepo } from "./commands/repo.js";
-import { runStatus } from "./commands/status.js";
-import { VibetoolsError } from "./util/errors.js";
+import { runRemove } from "./commands/remove.js";
+import { runSync } from "./commands/sync.js";
+import { runUninstall } from "./commands/uninstall.js";
+import { ViblibError } from "./util/errors.js";
 
-const program = new Command();
+const collectValues = (value: string, previous: string[]): string[] => [
+  ...previous,
+  value,
+];
 
-program
-  .name("vibetools")
-  .description("Manage agent skills/commands via a git-backed repo.")
-  .version("0.1.0");
+export function createProgram(): Command {
+  const program = new Command();
 
-program
-  .command("init")
-  .description(
-    "Initialize the vibetools git repo and directory structure, or clone an existing repo."
-  )
-  .option("--repo <path>", "Repo path (default: ~/.vibetools/repo)")
-  .option("--remote <url>", "Remote URL to clone from")
-  .option("--branch <name>", "Default branch name (default: main)")
-  .action(async (opts) => runInit(opts));
+  program
+    .name("viblib")
+    .description("Manage a personal skill catalog and install its skills.")
+    .version(packageMetadata.version);
 
-program
-  .command("configure")
-  .description("Configure local agent install paths and preferences.")
-  .action(async () => runConfigure());
+  program
+    .command("add <source>")
+    .description("Add a skill source to the catalog.")
+    .option(
+      "--skill <name>",
+      "Install name; repeat to add more skills.",
+      collectValues,
+      []
+    )
+    .option(
+      "--category <name>",
+      "Category; repeat to add more.",
+      collectValues,
+      []
+    )
+    .option("--replace", "Replace an existing catalog entry.")
+    .option("-y, --yes", "Skip confirmation prompts.")
+    .action(async (source: string, options) => await runAdd(source, options));
 
-program
-  .command("status")
-  .description("Show sync status between repo and enabled agents.")
-  .option("--json", "Output machine-readable JSON")
-  .option("--remote", "Fetch and show git ahead/behind (if remote configured)")
-  .option(
-    "--agent <id>",
-    "Filter to a single agent (codex|claude-code|cursor|opencode)"
-  )
-  .option("--type <type>", "Filter to a single type (skills|commands)")
-  .action(async (opts) => runStatus(opts));
+  program
+    .command("remove [skills...]")
+    .description("Remove skills from the catalog.")
+    .option(
+      "--skill <name>",
+      "Skill name; repeat to remove more.",
+      collectValues,
+      []
+    )
+    .option("--all", "Remove every catalog entry.")
+    .option("-y, --yes", "Skip confirmation prompts.")
+    .action(
+      async (skills: string[], options) => await runRemove(skills, options)
+    );
 
-program
-  .command("list")
-  .description("List skills, commands, or templates in the repo.")
-  .option(
-    "--type <type>",
-    "Filter to a single type (skills|commands|templates|all)"
-  )
-  .option("--json", "Output machine-readable JSON")
-  .action(async (opts) => runList(opts));
+  program
+    .command("list")
+    .description("List catalog skills.")
+    .option("--category <name>", "Only show this category.")
+    .option("--json", "Print JSON.")
+    .option("--plain", "Print one skill name per line.")
+    .action(async (options) => await runList(options));
 
-program
-  .command("install")
-  .description(
-    "Install repo skills/commands into enabled agents (symlink or copy)."
-  )
-  .option("--dry-run", "Print planned operations without writing")
-  .option(
-    "--agent <id>",
-    "Filter to a single agent (codex|claude-code|cursor|opencode)"
-  )
-  .option("--type <type>", "Filter to a single type (skills|commands)")
-  .option("--policy <policy>", "Conflict policy (prompt|repoWins|localWins)")
-  .option("--mode <mode>", "Install mode (symlink|copy)")
-  .option("--force", "Do not confirm per conflict (still backs up)")
-  .action(async (opts) => {
-    await runInstall(opts);
-  });
+  const category = program
+    .command("category")
+    .description("Manage skill categories.");
 
-program
-  .command("collect")
-  .description("Collect skills/commands from enabled agents into the repo.")
-  .option("--dry-run", "Print planned operations without writing")
-  .option(
-    "--agent <id>",
-    "Filter to a single agent (codex|claude-code|cursor|opencode)"
-  )
-  .option("--type <type>", "Filter to a single type (skills|commands)")
-  .option("--policy <policy>", "Conflict policy (prompt|repoWins|localWins)")
-  .option(
-    "--import-extras",
-    "Import local-only entries into the repo without prompting"
-  )
-  .option("--force", "Do not confirm per conflict (still backs up)")
-  .option("--select-all", "Select all skills/commands without prompting")
-  .option("--push", "Push changes to remote after collecting")
-  .option(
-    "--sources <list>",
-    "Comma-separated list of sources to collect from (shared,codex,cursor,etc.)"
-  )
-  .action(async (opts) => runCollect(opts));
+  category
+    .command("add <category>")
+    .description("Add a category to skills.")
+    .option(
+      "--skill <name>",
+      "Skill name; repeat to select more.",
+      collectValues,
+      []
+    )
+    .action(
+      async (categoryName: string, options) =>
+        await runCategoryAdd(categoryName, options)
+    );
 
-program
-  .command("pull")
-  .description("git pull then install into enabled agents.")
-  .option("--rebase", "Use git pull --rebase (default)")
-  .option("--no-rebase", "Use git pull --no-rebase")
-  .option("--dry-run", "Plan install without writing")
-  .option(
-    "--conflict-resolution <mode>",
-    "Conflict resolution mode (local|remote|prompt)"
-  )
-  .action(async (opts) => runPull(opts));
+  category
+    .command("remove <category>")
+    .description("Remove a category from skills.")
+    .option(
+      "--skill <name>",
+      "Skill name; repeat to select more.",
+      collectValues,
+      []
+    )
+    .option("--all", "Apply to every catalog skill.")
+    .option("-y, --yes", "Skip confirmation prompts.")
+    .action(
+      async (categoryName: string, options) =>
+        await runCategoryRemove(categoryName, options)
+    );
 
-program
-  .command("push")
-  .description("Collect, commit (if needed), then git push.")
-  .option("--message <msg>", "Commit message override")
-  .option("--dry-run", "Collect and plan git actions without writing")
-  .option("--collect", "Collect before push (default)")
-  .option("--no-collect", "Skip collect before push")
-  .action(async (opts) => runPush(opts));
+  category
+    .command("list")
+    .description("List catalog categories.")
+    .option("--json", "Print JSON.")
+    .action(async (options) => await runCategoryList(options));
 
-program
-  .command("doctor")
-  .description("Check environment, repo, and config for issues.")
-  .action(async () => runDoctor());
+  program
+    .command("install")
+    .description("Install catalog skills through skills.")
+    .option("-g, --global", "Install globally instead of in this project.")
+    .option(
+      "--category <name>",
+      "Category; repeat to select more.",
+      collectValues,
+      []
+    )
+    .option(
+      "--skill <name>",
+      "Skill name; repeat to select more.",
+      collectValues,
+      []
+    )
+    .option(
+      "-a, --agent <name>",
+      "Agent; repeat to select more.",
+      collectValues,
+      []
+    )
+    .option("--copy", "Copy instead of linking when supported.")
+    .option("-y, --yes", "Skip confirmation prompts.")
+    .option("--all", "Select every catalog skill.")
+    .action(async (options) => await runInstall(options));
 
-program
-  .command("repo")
-  .description("Open the configured remote repo in the browser.")
-  .option("--remote <name>", "Remote name to open (default: origin)")
-  .action(async (opts) => runRepo(opts));
+  program
+    .command("uninstall")
+    .description("Uninstall catalog skills through skills.")
+    .option("-g, --global", "Remove from global scope instead of this project.")
+    .option(
+      "--category <name>",
+      "Category; repeat to select more.",
+      collectValues,
+      []
+    )
+    .option(
+      "--skill <name>",
+      "Skill name; repeat to select more.",
+      collectValues,
+      []
+    )
+    .option(
+      "-a, --agent <name>",
+      "Agent; repeat to select more.",
+      collectValues,
+      []
+    )
+    .option("-y, --yes", "Skip confirmation prompts.")
+    .option("--all", "Select every catalog skill.")
+    .action(async (options) => await runUninstall(options));
 
-async function main(): Promise<void> {
-  await program.parseAsync(process.argv);
+  program
+    .command("sync")
+    .description("Check or restore installed skills to match the catalog.")
+    .option("-g, --global", "Use global scope instead of this project.")
+    .option(
+      "--category <name>",
+      "Category; repeat to select more.",
+      collectValues,
+      []
+    )
+    .option(
+      "--skill <name>",
+      "Skill name; repeat to select more.",
+      collectValues,
+      []
+    )
+    .option("--check", "Report differences without changing anything.")
+    .option("-y, --yes", "Skip confirmation prompts.")
+    .action(async (options) => await runSync(options));
+
+  return program;
 }
 
-main().catch((error: unknown) => {
-  const vibetoolsError = VibetoolsError.fromUnknown(error);
-  console.error(chalk.red(vibetoolsError.message));
-  process.exit(vibetoolsError.exitCode);
-});
+export async function main(argv = process.argv): Promise<void> {
+  await createProgram().parseAsync(argv);
+}
+
+function isEntrypoint(): boolean {
+  if (!process.argv[1]) {
+    return false;
+  }
+  try {
+    return (
+      realpathSync(process.argv[1]) ===
+      realpathSync(fileURLToPath(import.meta.url))
+    );
+  } catch {
+    return false;
+  }
+}
+
+if (isEntrypoint()) {
+  main().catch((error: unknown) => {
+    const viblibError = ViblibError.fromUnknown(error);
+    console.error(chalk.red(viblibError.message));
+    process.exitCode = viblibError.exitCode;
+  });
+}

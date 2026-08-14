@@ -1,13 +1,34 @@
 {
-  "name": "vibetools",
-  "version": "0.1.0",
+  "name": "viblib",
+  "version": "0.2.0",
   "private": false,
-  "description": "CLI for managing AI agent skills/commands via a git-backed vibetools repo.",
-  "license": "UNLICENSED",
-  "bin": {
-    "vibetools": "dist/cli.mjs"
+  "description": "A personal skill catalog and thin wrapper for skills.",
+  "keywords": [
+    "agent-skills",
+    "ai-agents",
+    "cli",
+    "skills"
+  ],
+  "homepage": "https://github.com/itsjling/vibetools-cli#readme",
+  "bugs": {
+    "url": "https://github.com/itsjling/vibetools-cli/issues"
   },
+  "license": "UNLICENSED",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/itsjling/vibetools-cli.git"
+  },
+  "bin": {
+    "viblib": "dist/cli.mjs"
+  },
+  "files": [
+    "dist"
+  ],
   "type": "module",
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
   "scripts": {
     "dev": "tsx src/cli.ts",
     "build": "tsdown",
@@ -17,20 +38,21 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "check": "ultracite check",
-    "fix": "ultracite fix"
+    "fix": "ultracite fix",
+    "prepack": "pnpm build",
+    "prepublishOnly": "pnpm typecheck && pnpm test && pnpm check"
   },
   "dependencies": {
     "chalk": "^5.6.2",
     "commander": "^14.0.2",
-    "diff": "^8.0.3",
-    "picomatch": "^4.0.3",
-    "prompts": "^2.4.2"
+    "prompts": "^2.4.2",
+    "skills": "1.5.22"
   },
   "devDependencies": {
-    "@types/node": "^20.17.31",
-    "oxfmt": "^0.28.0",
-    "oxlint": "^1.43.0",
-    "oxlint-tsgolint": "^0.11.4",
+    "@types/node": "^22.20.1",
+    "oxfmt": "^0.63.0",
+    "oxlint": "^1.78.0",
+    "oxlint-tsgolint": "^7.0.2001",
     "tsdown": "^0.20.0",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3",
@@ -38,7 +60,7 @@
     "vitest": "^4.0.18"
   },
   "engines": {
-    "node": ">=20.19.0",
+    "node": ">=22.20.0",
     "pnpm": ">=10"
   },
   "packageManager": "pnpm@10.26.0"

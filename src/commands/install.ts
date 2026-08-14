@@ -1,480 +1,227 @@
-import chalk from "chalk";
-import fs from "node:fs/promises";
-import path from "node:path";
 import prompts from "prompts";
 
-import type {
-  AgentId,
-  ConflictPolicy,
-  InstallMode,
-  SymlinkFallback,
-  VibetoolsArtifactType,
-} from "../config/types.js";
-
-import { diffFiles } from "../sync/diff.js";
-import { applyFilters } from "../sync/filters.js";
+import { loadCatalog } from "../catalog/io.js";
 import {
-  backupEntry,
-  copyEntry,
-  ensureDir,
-  listTopLevelEntries,
-  pathExists,
-  removeEntry,
-} from "../sync/fs.js";
-import { areHashesEqual, hashEntry } from "../sync/hash.js";
-import { createSymlink, isSymlink, sameRealpath } from "../sync/symlink.js";
-import { VibetoolsError } from "../util/errors.js";
-import { formatTimestampForPath } from "../util/time.js";
+  type CatalogSkill,
+  normalizeCategory,
+  normalizeInstallName,
+} from "../catalog/types.js";
 import {
-  agentTypeDir,
-  ensureRepoLooksInitialized,
-  loadConfigOrThrow,
-  parseAgentFilter,
-  parseTypeFilter,
-  repoTypeDir,
-} from "./_shared.js";
+  listInstalledSkills,
+  runSkills,
+  type SkillsRunner,
+} from "../skills/cli.js";
+import { sourceForInvocation } from "../skills/source.js";
+import type { SkillScope } from "../skills/types.js";
+import { ViblibError } from "../util/errors.js";
 
 export interface InstallOptions {
-  dryRun?: boolean;
-  agent?: string;
-  type?: string;
-  policy?: string;
-  mode?: string;
-  force?: boolean;
+  global?: boolean;
+  category?: string[];
+  skill?: string[];
+  agent?: string[];
+  copy?: boolean;
+  yes?: boolean;
+  all?: boolean;
+  cwd?: string;
+  runner?: SkillsRunner;
 }
 
-export interface KeptLocalEntry {
-  agentId: AgentId;
-  type: VibetoolsArtifactType;
-  name: string;
-  localPath: string;
-  repoPath: string;
+const abort = (): never => {
+  throw new ViblibError("Aborted.");
+};
+
+export async function loadCatalogSkills(): Promise<CatalogSkill[]> {
+  const { catalog } = await loadCatalog();
+  return Object.values(catalog.skills);
 }
 
-export interface InstallResult {
-  keptLocals: KeptLocalEntry[];
-  installed: number;
-  upToDate: number;
-  skipped: number;
-}
-
-type ConflictDecision = "replace" | "skip" | "abort";
-type EntryResult = "installed" | "up-to-date" | "skipped" | "abort";
-
-function promptOnCancel(): never {
-  throw new VibetoolsError("Aborted.", { exitCode: 1 });
-}
-
-function resolvePolicy(
-  optsPolicy: string | undefined,
-  configPolicy: ConflictPolicy
-): ConflictPolicy {
-  if (
-    optsPolicy === "prompt" ||
-    optsPolicy === "repoWins" ||
-    optsPolicy === "localWins"
-  ) {
-    return optsPolicy;
-  }
-  return configPolicy;
-}
-
-function resolveInstallMode(
-  optsMode: string | undefined,
-  configInstallMode: InstallMode
-): InstallMode {
-  if (optsMode === "copy" || optsMode === "symlink") {
-    return optsMode;
-  }
-  return configInstallMode;
-}
-
-async function decideConflict(args: {
-  agentId: AgentId;
-  type: VibetoolsArtifactType;
-  name: string;
-  src: string;
-  dest: string;
-  force: boolean;
-}): Promise<ConflictDecision> {
-  if (args.force) {
-    return "replace";
-  }
-
-  // If both are files, allow showing diff.
-  const srcStat = await fs.lstat(args.src).catch(() => null);
-  const destStat = await fs.lstat(args.dest).catch(() => null);
-  const canDiff =
-    srcStat !== null &&
-    destStat !== null &&
-    srcStat.isFile() &&
-    destStat.isFile();
-
-  while (true) {
-    const res = await prompts<{ decision: ConflictDecision | "diff" }>(
-      {
-        choices: [
-          { title: "Replace local with repo version", value: "replace" },
-          { title: "Keep local version", value: "skip" },
-          ...(canDiff ? [{ title: "Show diff", value: "diff" }] : []),
-          { title: "Abort", value: "abort" },
-        ],
-        message: `Conflict: ${args.agentId} ${args.type} '${args.name}' already exists locally. What do you want to do?`,
-        name: "decision",
-        type: "select",
-      },
-      { onCancel: promptOnCancel }
+function assertKnownSelectors(
+  entries: CatalogSkill[],
+  categories: Set<string>,
+  skills: Set<string>
+): void {
+  const knownSkills = new Set(
+      entries.map((entry) => normalizeInstallName(entry.skill))
+    ),
+    knownCategories = new Set(entries.flatMap((entry) => entry.categories)),
+    missingSkills = [...skills].filter((name) => !knownSkills.has(name)),
+    missingCategories = [...categories].filter(
+      (category) => !knownCategories.has(category)
     );
-
-    if (!res.decision) {
-      return "abort";
-    }
-    if (res.decision === "diff") {
-      const patch = await diffFiles(args.src, args.dest);
-      console.log(patch);
-      continue;
-    }
-    return res.decision;
-  }
-}
-
-async function isCorrectSymlink(dest: string, src: string): Promise<boolean> {
-  return (await isSymlink(dest)) && (await sameRealpath(dest, src));
-}
-
-async function isIdenticalCopy(src: string, dest: string): Promise<boolean> {
-  if (await isSymlink(dest)) {
-    return false;
-  }
-  const [repoHash, localHash] = await Promise.all([
-    hashEntry(src),
-    hashEntry(dest),
-  ]);
-  return areHashesEqual(repoHash, localHash);
-}
-
-async function decideReplacement(args: {
-  policy: ConflictPolicy;
-  agentId: AgentId;
-  type: VibetoolsArtifactType;
-  name: string;
-  src: string;
-  dest: string;
-  force: boolean;
-}): Promise<ConflictDecision> {
-  if (args.policy === "localWins") {
-    return "skip";
-  }
-  if (args.policy === "repoWins") {
-    return "replace";
-  }
-  return await decideConflict(args);
-}
-
-async function backupAndRemoveExisting(args: {
-  dest: string;
-  backupDest: string;
-  backupsEnabled: boolean;
-  dryRun: boolean;
-}): Promise<void> {
-  if (args.dryRun) {
-    return;
-  }
-  if (args.backupsEnabled) {
-    await backupEntry(args.dest, args.backupDest);
-  }
-  await removeEntry(args.dest);
-}
-
-async function installOne(args: {
-  src: string;
-  dest: string;
-  installMode: InstallMode;
-  symlinkFallback: SymlinkFallback;
-  dryRun: boolean;
-}): Promise<{ installed: boolean; modeUsed: InstallMode }> {
-  await ensureDir(path.dirname(args.dest));
-  if (args.dryRun) {
-    return { installed: true, modeUsed: args.installMode };
-  }
-
-  if (args.installMode === "copy") {
-    await copyEntry(args.src, args.dest);
-    return { installed: true, modeUsed: "copy" };
-  }
-
-  try {
-    await createSymlink(args.src, args.dest);
-    return { installed: true, modeUsed: "symlink" };
-  } catch (error) {
-    if (args.symlinkFallback === "error") {
-      throw error;
-    }
-    if (args.symlinkFallback === "copy") {
-      await copyEntry(args.src, args.dest);
-      return { installed: true, modeUsed: "copy" };
-    }
-    const res = await prompts<{ fallback: "copy" | "abort" }>(
-      {
-        choices: [
-          { title: "Fallback to copy", value: "copy" },
-          { title: "Abort", value: "abort" },
-        ],
-        message: `Failed to create symlink for ${args.dest}.`,
-        name: "fallback",
-        type: "select",
-      },
-      { onCancel: promptOnCancel }
+  if (missingSkills.length > 0) {
+    throw new ViblibError(
+      `Catalog skills not found: ${missingSkills.join(", ")}.`
     );
-    if (res.fallback === "copy") {
-      await copyEntry(args.src, args.dest);
-      return { installed: true, modeUsed: "copy" };
-    }
-    throw new VibetoolsError("Aborted.", { cause: error, exitCode: 2 });
+  }
+  if (missingCategories.length > 0) {
+    throw new ViblibError(
+      `Catalog categories not found: ${missingCategories.join(", ")}.`
+    );
   }
 }
 
-async function installEntry(args: {
-  agentId: AgentId;
-  backupsEnabled: boolean;
-  backupDest: string;
-  dest: string;
-  dryRun: boolean;
-  force: boolean;
-  installMode: InstallMode;
-  name: string;
-  policy: ConflictPolicy;
-  src: string;
-  symlinkFallback: SymlinkFallback;
-  type: VibetoolsArtifactType;
-  onKeepLocal?: (entry: KeptLocalEntry) => void;
-}): Promise<EntryResult> {
-  if (await pathExists(args.dest)) {
-    if (await isCorrectSymlink(args.dest, args.src)) {
-      return "up-to-date";
-    }
-    if (await isIdenticalCopy(args.src, args.dest)) {
-      return "up-to-date";
-    }
-
-    const decision = await decideReplacement({
-      agentId: args.agentId,
-      dest: args.dest,
-      force: args.force,
-      name: args.name,
-      policy: args.policy,
-      src: args.src,
-      type: args.type,
-    });
-    if (decision === "skip") {
-      if (args.onKeepLocal) {
-        args.onKeepLocal({
-          agentId: args.agentId,
-          localPath: args.dest,
-          name: args.name,
-          repoPath: args.src,
-          type: args.type,
-        });
-      }
-      return "skipped";
-    }
-    if (decision === "abort") {
-      return "abort";
-    }
-
-    await backupAndRemoveExisting({
-      backupDest: args.backupDest,
-      backupsEnabled: args.backupsEnabled,
-      dest: args.dest,
-      dryRun: args.dryRun,
-    });
+export function selectCatalogSkills(
+  entries: CatalogSkill[],
+  options: Pick<InstallOptions, "category" | "skill" | "all">
+): CatalogSkill[] {
+  if (options.category?.length && options.skill?.length) {
+    throw new ViblibError("Use either --category or --skill, not both.");
+  }
+  if (options.all || options.skill?.includes("*")) {
+    return entries;
+  }
+  if (!options.category?.length && !options.skill?.length) {
+    return entries;
   }
 
-  const result = await installOne({
-    dest: args.dest,
-    dryRun: args.dryRun,
-    installMode: args.installMode,
-    src: args.src,
-    symlinkFallback: args.symlinkFallback,
-  });
-
-  if (args.dryRun) {
-    console.log(
-      `${args.agentId} ${args.type}: would install ${args.name} (${args.installMode})`
+  const categories = new Set(
+      (options.category ?? []).map((category) => normalizeCategory(category))
+    ),
+    skills = new Set(
+      (options.skill ?? []).map((skill) => normalizeInstallName(skill))
     );
-    return "installed";
-  }
-
-  console.log(
-    chalk.green(
-      `${args.agentId} ${args.type}: installed ${args.name} (${result.modeUsed === "symlink" ? "symlink" : "copy"})`
-    )
+  assertKnownSelectors(entries, categories, skills);
+  return entries.filter(
+    (entry) =>
+      skills.has(normalizeInstallName(entry.skill)) ||
+      entry.categories.some((category) => categories.has(category))
   );
-  return "installed";
 }
 
-interface InstallCounts {
-  installed: number;
-  upToDate: number;
-  skipped: number;
-}
-
-async function installForAgentType(args: {
-  agentId: AgentId;
-  config: Awaited<ReturnType<typeof loadConfigOrThrow>>["config"];
-  counts: InstallCounts;
-  dryRun: boolean;
-  force: boolean;
-  installMode: InstallMode;
-  policy: ConflictPolicy;
-  timestamp: string;
-  type: VibetoolsArtifactType;
-  onKeepLocal?: (entry: KeptLocalEntry) => void;
-}): Promise<"ok" | "abort"> {
-  const agentCfg = args.config.agents[args.agentId];
-  const localRoot = agentTypeDir(args.config, args.agentId, args.type);
-  if (!localRoot) {
-    return "ok";
-  }
-  const repoRoot = repoTypeDir(args.config.repoPath, args.type);
-  const names = applyFilters(
-    await listTopLevelEntries(repoRoot),
-    agentCfg.filters[args.type]
+async function pickCatalogSkills(
+  entries: CatalogSkill[],
+  message: string
+): Promise<CatalogSkill[]> {
+  const answer = await prompts<{ skills?: string[] }>(
+      {
+        choices: entries.map((entry) => ({
+          title: `${entry.skill} (${entry.source})`,
+          value: normalizeInstallName(entry.skill),
+        })),
+        message,
+        name: "skills",
+        type: "multiselect",
+      },
+      { onCancel: abort }
+    ),
+    selected = new Set(answer.skills);
+  return entries.filter((entry) =>
+    selected.has(normalizeInstallName(entry.skill))
   );
-
-  for (const name of names) {
-    const src = path.join(repoRoot, name);
-    const dest = path.join(localRoot, name);
-    const backupDest = path.join(
-      args.config.backups.dir,
-      args.timestamp,
-      args.agentId,
-      args.type,
-      name
-    );
-    const result = await installEntry({
-      agentId: args.agentId,
-      backupDest,
-      backupsEnabled: args.config.backups.enabled,
-      dest,
-      dryRun: args.dryRun,
-      force: args.force,
-      installMode: args.installMode,
-      name,
-      onKeepLocal: args.onKeepLocal,
-      policy: args.policy,
-      src,
-      symlinkFallback: args.config.symlinkFallback,
-      type: args.type,
-    });
-    if (result === "abort") {
-      return "abort";
-    }
-    if (result === "installed") {
-      args.counts.installed++;
-    } else if (result === "up-to-date") {
-      args.counts.upToDate++;
-    } else if (result === "skipped") {
-      args.counts.skipped++;
-    }
-  }
-
-  return "ok";
 }
 
-async function installForAgent(args: {
-  agentId: AgentId;
-  config: Awaited<ReturnType<typeof loadConfigOrThrow>>["config"];
-  counts: InstallCounts;
-  dryRun: boolean;
-  force: boolean;
-  installMode: InstallMode;
-  policy: ConflictPolicy;
-  timestamp: string;
-  types: VibetoolsArtifactType[];
-  onKeepLocal?: (entry: KeptLocalEntry) => void;
-}): Promise<"ok" | "abort"> {
-  const agentCfg = args.config.agents[args.agentId];
-  if (!agentCfg.enabled) {
-    return "ok";
+async function confirmPlan(message: string): Promise<void> {
+  const answer = await prompts<{ ok?: boolean }>(
+    { initial: true, message, name: "ok", type: "confirm" },
+    { onCancel: abort }
+  );
+  if (!answer.ok) {
+    abort();
   }
-  for (const type of args.types) {
-    const result = await installForAgentType({
-      agentId: args.agentId,
-      config: args.config,
-      counts: args.counts,
-      dryRun: args.dryRun,
-      force: args.force,
-      installMode: args.installMode,
-      onKeepLocal: args.onKeepLocal,
-      policy: args.policy,
-      timestamp: args.timestamp,
-      type,
-    });
-    if (result === "abort") {
-      return "abort";
-    }
-  }
-  return "ok";
 }
 
-export async function runInstall(opts: InstallOptions): Promise<InstallResult> {
-  const { config } = await loadConfigOrThrow();
-  await ensureRepoLooksInitialized(config.repoPath);
+export async function applyCatalogInstall(
+  entries: CatalogSkill[],
+  options: {
+    scope: SkillScope;
+    agent?: string[];
+    copy?: boolean;
+    cwd?: string;
+    runner?: SkillsRunner;
+  }
+): Promise<{ failed: string[]; installed: number }> {
+  const grouped = new Map<string, CatalogSkill[]>();
+  for (const entry of entries) {
+    grouped.set(entry.source, [...(grouped.get(entry.source) ?? []), entry]);
+  }
 
-  const agents = parseAgentFilter(opts.agent);
-  const types = parseTypeFilter(opts.type);
-
-  const policy = resolvePolicy(opts.policy, config.conflictPolicy);
-  const installMode = resolveInstallMode(opts.mode, config.installMode);
-  const timestamp = formatTimestampForPath();
-
-  const keptLocals: KeptLocalEntry[] = [];
-  const counts: InstallCounts = { installed: 0, skipped: 0, upToDate: 0 };
-
-  const onKeepLocal = (entry: KeptLocalEntry): void => {
-    keptLocals.push(entry);
-  };
-
-  for (const agentId of agents) {
-    const result = await installForAgent({
-      agentId,
-      config,
-      counts,
-      dryRun: Boolean(opts.dryRun),
-      force: Boolean(opts.force),
-      installMode,
-      onKeepLocal,
-      policy,
-      timestamp,
-      types,
-    });
-    if (result === "abort") {
-      throw new VibetoolsError("Aborted due to unresolved conflicts.", {
-        exitCode: 2,
+  const failed: string[] = [];
+  let installed = 0;
+  for (const [source, group] of grouped) {
+    console.log(`\n${source}`);
+    const args = [
+        "add",
+        await sourceForInvocation(source, options.cwd),
+        "--skill",
+        ...group.map((entry) => entry.skill),
+        "--yes",
+        ...(options.scope === "global" ? ["--global"] : []),
+        ...(options.copy ? ["--copy"] : []),
+        ...(options.agent?.length ? ["--agent", ...options.agent] : []),
+      ],
+      result = await runSkills(args, {
+        cwd: options.cwd,
+        inherit: true,
+        runner: options.runner,
       });
+    if (result.code === 0) {
+      installed += group.length;
+    } else {
+      failed.push(source);
     }
   }
+  return { failed, installed };
+}
 
-  if (counts.installed === 0 && counts.skipped === 0 && counts.upToDate > 0) {
-    console.log(
-      chalk.dim(
-        `${counts.upToDate} ${counts.upToDate === 1 ? "entry" : "entries"} up to date.`
-      )
+export async function runInstall(options: InstallOptions = {}): Promise<void> {
+  const selectsEverything = options.all || options.skill?.includes("*");
+  const effectiveOptions = options.all
+    ? Object.assign({}, options, { agent: ["*"], yes: true })
+    : options;
+  const hasSelector = Boolean(
+    selectsEverything ||
+    effectiveOptions.category?.length ||
+    effectiveOptions.skill?.length
+  );
+  if (effectiveOptions.yes && !hasSelector) {
+    throw new ViblibError("--yes needs --category, --skill, or --all.");
+  }
+
+  const entries = await loadCatalogSkills();
+  if (entries.length === 0) {
+    throw new ViblibError("No catalog skills are available.");
+  }
+  const selected = hasSelector
+    ? selectCatalogSkills(entries, effectiveOptions)
+    : await pickCatalogSkills(entries, "Select skills to install");
+  if (selected.length === 0) {
+    throw new ViblibError("No skills selected.");
+  }
+
+  const scope: SkillScope = effectiveOptions.global ? "global" : "project",
+    installed = await listInstalledSkills({
+      cwd: effectiveOptions.cwd,
+      runner: effectiveOptions.runner,
+      scope,
+    }),
+    installedNames = new Set(
+      installed.map((entry) => normalizeInstallName(entry.name))
     );
-  } else if (counts.installed > 0 || counts.skipped > 0) {
-    const parts: string[] = [];
-    if (counts.installed > 0) {
-      parts.push(`${counts.installed} installed`);
-    }
-    if (counts.upToDate > 0) {
-      parts.push(`${counts.upToDate} up to date`);
-    }
-    if (counts.skipped > 0) {
-      parts.push(`${counts.skipped} skipped`);
-    }
-    console.log(chalk.dim(parts.join(", ")));
+  console.log(`Install plan (${scope}):`);
+  for (const entry of selected) {
+    const action = installedNames.has(normalizeInstallName(entry.skill))
+      ? "replace or refresh"
+      : "install";
+    console.log(`  ${action}: ${entry.skill} (${entry.source})`);
+  }
+  if (!effectiveOptions.yes) {
+    await confirmPlan(`Apply ${selected.length} change(s)?`);
   }
 
-  return { installed: counts.installed, keptLocals, skipped: counts.skipped, upToDate: counts.upToDate };
+  const result = await applyCatalogInstall(selected, {
+    agent: effectiveOptions.agent,
+    copy: effectiveOptions.copy,
+    cwd: effectiveOptions.cwd,
+    runner: effectiveOptions.runner,
+    scope,
+  });
+  console.log(
+    `\nInstalled ${result.installed}/${selected.length} selected skill(s).`
+  );
+  if (result.failed.length > 0) {
+    throw new ViblibError(
+      `Failed sources: ${result.failed.join(", ")}. Other sources were still attempted.`
+    );
+  }
 }
