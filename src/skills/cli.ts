@@ -3,6 +3,7 @@ import { createRequire } from "node:module";
 import path from "node:path";
 import { stripVTControlCharacters } from "node:util";
 
+import { assertSafeSkillName } from "../catalog/types.js";
 import { ViblibError } from "../util/errors.js";
 import { sourceForCatalog } from "./source.js";
 import type { InstalledSkill, SkillScope } from "./types.js";
@@ -163,6 +164,9 @@ export async function discoverSkills(
       "Could not parse the discovery output from skills@1.5.22. Update the parser for this skills version before continuing.",
       { exitCode: 2 }
     );
+  }
+  for (const skill of skills) {
+    assertSafeSkillName(skill.name);
   }
   return {
     skills,

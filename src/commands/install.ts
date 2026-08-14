@@ -3,6 +3,7 @@ import prompts from "prompts";
 import { loadCatalog } from "../catalog/io.js";
 import {
   type CatalogSkill,
+  assertSafeSkillName,
   normalizeCategory,
   normalizeInstallName,
 } from "../catalog/types.js";
@@ -131,6 +132,9 @@ export async function applyCatalogInstall(
     runner?: SkillsRunner;
   }
 ): Promise<{ failed: string[]; installed: number }> {
+  for (const entry of entries) {
+    assertSafeSkillName(entry.skill);
+  }
   const grouped = new Map<string, CatalogSkill[]>();
   for (const entry of entries) {
     grouped.set(entry.source, [...(grouped.get(entry.source) ?? []), entry]);

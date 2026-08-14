@@ -12,7 +12,7 @@ modified while creating them.
 
 | Plan                                               | Title                                                   | Priority | Effort | Depends on | Status |
 | -------------------------------------------------- | ------------------------------------------------------- | -------: | -----: | ---------- | ------ |
-| [001](001-reject-option-like-skill-names.md)       | Reject option-like skill names before invoking `skills` |       P1 |      S | —          | TODO   |
+| [001](001-reject-option-like-skill-names.md)       | Reject option-like skill names before invoking `skills` |       P1 |      S | —          | DONE   |
 | [002](002-compare-sync-source-subpaths.md)         | Detect source-subpath drift during sync                 |       P1 |      M | —          | TODO   |
 | [003](003-block-credential-bearing-sources.md)     | Block credential-bearing source references              |       P1 |      S | —          | TODO   |
 | [004](004-serialize-catalog-updates.md)            | Serialize catalog updates                               |       P1 |      M | —          | TODO   |
