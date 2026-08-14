@@ -98,3 +98,32 @@ viblib sync [-g] [--category <name>]... [--skill <name>]... [--check] [-y]
 ```
 
 The wrapped `skills` process keeps its own telemetry behavior. Set `DISABLE_TELEMETRY=1` to turn it off.
+
+## Release
+
+You need npm and GitHub CLI access for the package and repository. Start from a clean, current `main` branch, then run:
+
+```sh
+git switch main
+git pull --ff-only
+git status --short
+npm whoami
+gh auth status
+
+pnpm run prepublishOnly
+pnpm version patch
+release_version=$(node -p "require('./package.json').version")
+pnpm publish
+git push origin main --follow-tags
+gh release create "v${release_version}" --verify-tag --generate-notes
+```
+
+Use `minor` or `major` instead of `patch` when needed. `pnpm version` updates `package.json`, makes the version commit, and adds the `v<version>` tag. `pnpm publish` runs the checks in `prepublishOnly` and builds the package through `prepack`. Check the version before publishing because npm will not let you reuse it.
+
+Confirm both releases:
+
+```sh
+release_version=$(node -p "require('./package.json').version")
+npm view viblib version
+gh release view "v${release_version}"
+```
